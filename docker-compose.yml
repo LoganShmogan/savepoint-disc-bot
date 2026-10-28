@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    logging: # size-limited, as promised in the bot's privacy policy
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    env_file: .env
+    volumes:
+      - hub-data:/data
+      - ./projects.yaml:/config/projects.yaml:ro
+    ports:
+      # Only reachable over Tailscale: bind to the server's Tailscale IP from .env.
+      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:8080:8080"
+
+volumes:
+  hub-data:

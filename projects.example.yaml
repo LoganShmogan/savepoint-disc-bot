@@ -1,0 +1,16 @@
+# Save Point Project Hub · © Save Point Limited
+# Copy to projects.yaml (git-ignored). See docs/03-configuration.md.
+
+# Right-click → Copy ID in Discord (turn on Developer Mode in Settings → Advanced).
+guild_id: "000000000000000000"
+team_role_id: ""        # role allowed to use the bot; empty = everyone in the server
+max_file_mb: 10         # Discord's limit: 10 (no boosts), 50 (level 2), 100 (level 3)
+poll_minutes: 3
+
+projects:
+  - name: memeline
+    forum_channel_id: "000000000000000000"
+    repo: your-org/MemeLine        # optional; leave out for upload-only projects
+    branch: main
+    docs: ["docs/**", "README.md"]
+    dev_files: [".env.example", "prisma/schema.prisma"]
