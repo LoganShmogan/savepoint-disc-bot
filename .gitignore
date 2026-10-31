@@ -2,3 +2,10 @@
 projects.yaml
 data/
 dist/
+
+# Secrets: never commit these
+.env.*
+!.env.example
+*.pem
+*.key
+*.db

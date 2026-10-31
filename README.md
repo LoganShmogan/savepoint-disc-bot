@@ -57,6 +57,33 @@ make deploy                             # copy the code, rebuild, restart
 
 The full walkthrough is in **[docs/](docs/README.md)**: Discord setup, forum layout, configuration, deployment, the CLI, data handling and troubleshooting.
 
+## Project layout
+
+```
+savepoint-disc-bot/
+├── cmd/
+│   ├── bot/main.go           # The Discord bot
+│   └── docsync/main.go       # The docsync command-line tool
+├── internal/
+│   ├── api/                  # docsync API (Tailscale only)
+│   ├── config/               # Loads .env and projects.yaml
+│   ├── discord/              # Slash commands, forum posts, project setup
+│   ├── filesync/             # Versioning and de-duplication of files
+│   ├── ghwatch/              # GitHub polling: files and activity feed
+│   └── store/                # SQLite storage
+├── docs/                     # Staff documentation, 01–09 (start at docs/README.md)
+├── legal/                    # Terms of Service and Privacy Policy
+├── .github/CODEOWNERS
+├── .env.example              # Template for .env (bot + GitHub tokens, Tailscale IP)
+├── projects.example.yaml     # Template for projects.yaml (server, forums, repos)
+├── Dockerfile  docker-compose.yml  Makefile
+├── go.mod  go.sum
+├── LICENSE                   # Proprietary, all rights reserved
+└── SECURITY.md
+```
+
+`.env`, `projects.yaml`, `data/` (the SQLite database) and `dist/` are git-ignored and never committed.
+
 ## Legal
 
 - [Terms of Service](legal/terms-of-service.md), published at <https://savepoint.co.nz/legal/discord-bot#terms>
