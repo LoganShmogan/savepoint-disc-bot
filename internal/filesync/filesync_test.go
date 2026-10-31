@@ -42,7 +42,7 @@ func setup(t *testing.T) (*Syncer, *fakePoster, *config.Project) {
 	}
 	t.Cleanup(func() { st.Close() })
 	fp := &fakePoster{}
-	proj := &config.Project{Name: "demo", ForumChannelID: "f1", Docs: []string{"docs/**"}, DevFiles: []string{".env.example"}}
+	proj := &config.Project{GuildID: "g", Name: "demo", ForumChannelID: "f1", Docs: []string{"docs/**"}, DevFiles: []string{".env.example"}}
 	return &Syncer{Store: st, Poster: fp, MaxBytes: 100}, fp, proj
 }
 
@@ -111,14 +111,14 @@ func TestRemovedThenRestored(t *testing.T) {
 	s, fp, proj := setup(t)
 	gh := Request{Project: proj, Path: "docs/a.md", Content: []byte("x"), Source: store.SourceGitHub, User: "GitHub"}
 	upsert(t, s, gh)
-	rec, _ := s.Store.GetFile("demo", "docs/a.md")
+	rec, _ := s.Store.GetFile(proj.Key(), "docs/a.md")
 	if err := s.MarkRemoved(context.Background(), rec, "abc"); err != nil {
 		t.Fatal(err)
 	}
 	if fp.archived != 1 {
 		t.Fatal("post not archived")
 	}
-	if st, _ := s.Check("demo", "docs/a.md", Hash([]byte("y"))); st != Updated {
+	if st, _ := s.Check(proj, "docs/a.md", Hash([]byte("y"))); st != Updated {
 		t.Fatalf("removed GitHub file should accept uploads, got %s", st)
 	}
 	if r := upsert(t, s, gh); r.Status != Updated || fp.replaced != 1 {

@@ -8,9 +8,10 @@ All of the bot's own data is in one SQLite database on Save Point's server.
 
 | Table | Contents |
 |---|---|
-| `files` | Project, path, SHA-256 hash, git blob SHA, version, source (`github` / `upload` / `cli`), Discord post ID, display name of who last changed it, timestamp |
+| `projects` | Discord server ID, project name, forum channel ID, GitHub repo, branch and file globs. No personal data |
+| `files` | Project (server ID + name), path, SHA-256 hash, git blob SHA, version, source (`github` / `upload` / `cli`), Discord post ID, display name of who last changed it, timestamp |
 | `gh_state` | Last commit seen and activity post ID per project |
-| `cli_tokens` | **SHA-256 hash** of each docsync token, the Discord user ID and display name. The token itself is never stored |
+| `cli_tokens` | **SHA-256 hash** of each docsync token, the Discord user ID and display name, and the server it was made in. The token itself is never stored |
 
 The files themselves are stored by Discord, as attachments, and by GitHub. The bot keeps no copies of their contents.
 
@@ -24,8 +25,9 @@ The files themselves are stored by Discord, as attachments, and by GitHub. The b
 
 ## Access control
 
-- **Slash commands:** if `team_role_id` is set, only members with that role can use them. Commands don't work in DMs.
-- **docsync API:** every request needs a valid token (`Authorization: Bearer`). Tokens are 192-bit random values, compared by hash. `/token` replaces a user's previous token. Each change is credited to the token's owner.
+- **Slash commands:** in the home server, if `team_role_id` is set, only members with that role can use them. Other servers limit commands through Server Settings → Integrations. `/project` needs Manage Channels by default. Commands don't work in DMs.
+- **Server separation:** a server only sees and changes its own projects. Only the home server (`guild_id`) can mirror private repos. Other servers are limited to public repos, checked when a project is made and on every poll. When the bot is removed from a server, that server's projects are deleted from the database.
+- **docsync API:** every request needs a valid token (`Authorization: Bearer`). Tokens are 192-bit random values, compared by hash. A token only works for projects in the server where `/token` was run. `/token` replaces a user's previous token. Each change is credited to the token's owner.
 - **Paths:** uploaded paths are normalised, and anything that tries to escape the project (`../`) is rejected.
 
 ## Secrets

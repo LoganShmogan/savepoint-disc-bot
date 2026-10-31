@@ -4,10 +4,14 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/LoganShmogan/savepoint-disc-bot/internal/config"
 )
 
 const schema = `
@@ -36,6 +40,16 @@ CREATE TABLE IF NOT EXISTS cli_tokens (
 	user_id    TEXT NOT NULL UNIQUE,
 	user_name  TEXT NOT NULL,
 	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+	guild_id         TEXT NOT NULL,
+	name             TEXT NOT NULL,
+	forum_channel_id TEXT NOT NULL,
+	repo             TEXT NOT NULL DEFAULT '',
+	branch           TEXT NOT NULL DEFAULT 'main',
+	docs             TEXT NOT NULL DEFAULT '[]', -- JSON array of globs
+	dev_files        TEXT NOT NULL DEFAULT '[]',
+	PRIMARY KEY (guild_id, name)
 );`
 
 type Source string
@@ -76,7 +90,28 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Added when the bot went multi-server; older databases lack it.
+	if _, err := db.Exec(`ALTER TABLE cli_tokens ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// AdoptLegacy moves rows from before the bot went multi-server, keyed by bare
+// project name, onto the home server. It is a no-op once done.
+func (s *Store) AdoptLegacy(homeGuild string) error {
+	for _, q := range []string{
+		`UPDATE files SET project = ? || '/' || project WHERE instr(project, '/') = 0`,
+		`UPDATE gh_state SET project = ? || '/' || project WHERE instr(project, '/') = 0`,
+		`UPDATE cli_tokens SET guild_id = ? WHERE guild_id = ''`,
+	} {
+		if _, err := s.db.Exec(q, homeGuild); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -152,8 +187,72 @@ func (s *Store) PutGHState(st *GHState) error {
 	return err
 }
 
-// PutToken stores a CLI token hash for a user, replacing any previous token.
-func (s *Store) PutToken(hash, userID, userName string) error {
+const projectCols = `guild_id, name, forum_channel_id, repo, branch, docs, dev_files`
+
+func scanProject(row interface{ Scan(...any) error }) (*config.Project, error) {
+	var p config.Project
+	var docs, dev string
+	if err := row.Scan(&p.GuildID, &p.Name, &p.ForumChannelID, &p.Repo, &p.Branch, &docs, &dev); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(docs), &p.Docs); err != nil {
+		return nil, err
+	}
+	return &p, json.Unmarshal([]byte(dev), &p.DevFiles)
+}
+
+// GetProject returns nil, nil when the server has no such project.
+func (s *Store) GetProject(guildID, name string) (*config.Project, error) {
+	p, err := scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE guild_id = ? AND name = ?`,
+		guildID, config.NormalizeName(name)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return p, err
+}
+
+// ListProjects returns a server's projects, or every server's when guildID is "".
+func (s *Store) ListProjects(guildID string) ([]*config.Project, error) {
+	rows, err := s.db.Query(`SELECT `+projectCols+` FROM projects WHERE ? = '' OR guild_id = ? ORDER BY guild_id, name`, guildID, guildID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*config.Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PutProject(p *config.Project) error {
+	docs, _ := json.Marshal(append([]string{}, p.Docs...))
+	dev, _ := json.Marshal(append([]string{}, p.DevFiles...))
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO projects (`+projectCols+`) VALUES (?,?,?,?,?,?,?)`,
+		p.GuildID, p.Name, p.ForumChannelID, p.Repo, p.Branch, docs, dev)
+	return err
+}
+
+// DeleteProject stops tracking a project. Its file records are kept, so
+// re-adding it under the same name picks up where it left off.
+func (s *Store) DeleteProject(guildID, name string) error {
+	_, err := s.db.Exec(`DELETE FROM projects WHERE guild_id = ? AND name = ?`, guildID, name)
+	return err
+}
+
+// DeleteGuild forgets every project in a server the bot was removed from.
+func (s *Store) DeleteGuild(guildID string) error {
+	_, err := s.db.Exec(`DELETE FROM projects WHERE guild_id = ?`, guildID)
+	return err
+}
+
+// PutToken stores a CLI token hash for a user, scoped to the server it was
+// made in, replacing any previous token.
+func (s *Store) PutToken(hash, userID, userName, guildID string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -162,18 +261,18 @@ func (s *Store) PutToken(hash, userID, userName string) error {
 	if _, err := tx.Exec(`DELETE FROM cli_tokens WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO cli_tokens (token_hash, user_id, user_name, created_at) VALUES (?,?,?,?)`,
-		hash, userID, userName, time.Now().Unix()); err != nil {
+	if _, err := tx.Exec(`INSERT INTO cli_tokens (token_hash, user_id, user_name, guild_id, created_at) VALUES (?,?,?,?,?)`,
+		hash, userID, userName, guildID, time.Now().Unix()); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 // LookupToken returns "" when the token hash is unknown.
-func (s *Store) LookupToken(hash string) (userName string, err error) {
-	err = s.db.QueryRow(`SELECT user_name FROM cli_tokens WHERE token_hash = ?`, hash).Scan(&userName)
+func (s *Store) LookupToken(hash string) (userName, guildID string, err error) {
+	err = s.db.QueryRow(`SELECT user_name, guild_id FROM cli_tokens WHERE token_hash = ?`, hash).Scan(&userName, &guildID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return "", "", nil
 	}
-	return userName, err
+	return userName, guildID, err
 }

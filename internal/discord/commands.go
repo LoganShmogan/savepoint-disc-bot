@@ -19,21 +19,36 @@ import (
 	"github.com/LoganShmogan/savepoint-disc-bot/internal/store"
 )
 
-// Bot handles slash commands.
+// Bot handles slash commands in every server it has been added to.
 type Bot struct {
-	S        *discordgo.Session
-	Cfg      *config.Config
-	Store    *store.Store
-	Sync     *filesync.Syncer
-	Trigger  func(project string) // nil when GitHub sync is disabled
-	APIURL   string               // shown in /token instructions
-	download *http.Client
+	S         *discordgo.Session
+	Cfg       *config.Config
+	Store     *store.Store
+	Sync      *filesync.Syncer
+	Trigger   func(only string)                                  // nil when GitHub sync is disabled; see ghwatch.Trigger
+	CheckRepo func(ctx context.Context, p *config.Project) error // nil when GitHub sync is disabled
+	APIURL    string                                             // shown in /token instructions
+	download  *http.Client
 }
 
 func NewBot(s *discordgo.Session, cfg *config.Config, st *store.Store, sync *filesync.Syncer) *Bot {
 	b := &Bot{S: s, Cfg: cfg, Store: st, Sync: sync, download: &http.Client{Timeout: time.Minute}}
 	s.AddHandler(b.onInteraction)
+	s.AddHandler(b.onGuildDelete)
 	return b
+}
+
+// onGuildDelete forgets a server's projects when the bot is removed from it.
+// Unavailable means a Discord outage, not a removal.
+func (b *Bot) onGuildDelete(_ *discordgo.Session, g *discordgo.GuildDelete) {
+	if g.Unavailable {
+		return
+	}
+	if err := b.Store.DeleteGuild(g.ID); err != nil {
+		slog.Error("forget guild", "guild", g.ID, "err", err)
+		return
+	}
+	slog.Info("removed from server; forgot its projects", "guild", g.ID)
 }
 
 func projectOpt(required bool) *discordgo.ApplicationCommandOption {
@@ -43,7 +58,58 @@ func projectOpt(required bool) *discordgo.ApplicationCommandOption {
 	}
 }
 
+var (
+	guildOnly    = &[]discordgo.InteractionContextType{discordgo.InteractionContextGuild}
+	manageForums = ptr(int64(discordgo.PermissionManageChannels))
+)
+
+func stringOpt(name, desc string) *discordgo.ApplicationCommandOption {
+	return &discordgo.ApplicationCommandOption{Type: discordgo.ApplicationCommandOptionString, Name: name, Description: desc}
+}
+
+// projectSettings are the options /project create and edit share.
+func projectSettings() []*discordgo.ApplicationCommandOption {
+	return []*discordgo.ApplicationCommandOption{
+		stringOpt("repo", "GitHub repo to mirror, owner/name (\"-\" to clear)"),
+		stringOpt("branch", "Branch to mirror (default: main)"),
+		stringOpt("docs", "Comma-separated globs for docs (default: docs/**, README.md)"),
+		stringOpt("dev_files", "Comma-separated globs for dev files, e.g. .env.example (\"-\" to clear)"),
+	}
+}
+
 var commands = []*discordgo.ApplicationCommand{
+	{
+		Name: "project", Description: "Set up project forums in this server",
+		DefaultMemberPermissions: manageForums,
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type: discordgo.ApplicationCommandOptionSubCommand, Name: "create",
+				Description: "Make a forum for a project and start syncing it",
+				Options: append([]*discordgo.ApplicationCommandOption{
+					{Type: discordgo.ApplicationCommandOptionString, Name: "name", Description: "Project name, e.g. memeline", Required: true, MaxLength: 50},
+				}, append(projectSettings(),
+					&discordgo.ApplicationCommandOption{
+						Type: discordgo.ApplicationCommandOptionChannel, Name: "category", Description: "Category to put the new forum in",
+						ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildCategory},
+					},
+					&discordgo.ApplicationCommandOption{
+						Type: discordgo.ApplicationCommandOptionChannel, Name: "forum", Description: "Use this existing forum instead of making a new one",
+						ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildForum},
+					},
+				)...),
+			},
+			{
+				Type: discordgo.ApplicationCommandOptionSubCommand, Name: "edit",
+				Description: "Change a project's repo, branch or file patterns",
+				Options:     append([]*discordgo.ApplicationCommandOption{projectOpt(true)}, projectSettings()...),
+			},
+			{
+				Type: discordgo.ApplicationCommandOptionSubCommand, Name: "remove",
+				Description: "Stop syncing a project (its forum and posts are kept)",
+				Options:     []*discordgo.ApplicationCommandOption{projectOpt(true)},
+			},
+		},
+	},
 	{
 		Name: "upload", Description: "Upload a file to a project; replaces it if a newer version",
 		Options: []*discordgo.ApplicationCommandOption{
@@ -58,10 +124,23 @@ var commands = []*discordgo.ApplicationCommand{
 	{Name: "token", Description: "Get a personal token for the docsync CLI (replaces your old one)"},
 }
 
-// Register installs the commands on the guild (guild commands update instantly).
+// Register installs the commands globally, so they work in every server the
+// bot is added to.
 func (b *Bot) Register() error {
-	_, err := b.S.ApplicationCommandBulkOverwrite(b.S.State.User.ID, b.Cfg.GuildID, commands)
-	return err
+	for _, c := range commands {
+		c.Contexts = guildOnly
+	}
+	appID := b.S.State.User.ID
+	if _, err := b.S.ApplicationCommandBulkOverwrite(appID, "", commands); err != nil {
+		return err
+	}
+	// Older versions registered per-guild copies, which would now show twice.
+	if b.Cfg.GuildID != "" {
+		if _, err := b.S.ApplicationCommandBulkOverwrite(appID, b.Cfg.GuildID, nil); err != nil {
+			slog.Warn("couldn't clear old guild commands", "err", err)
+		}
+	}
+	return nil
 }
 
 func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -73,12 +152,15 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 			b.reply(i, "Use me inside the server, not in DMs.")
 			return
 		}
-		if b.Cfg.TeamRoleID != "" && !slices.Contains(i.Member.Roles, b.Cfg.TeamRoleID) {
+		// Other servers control access through Server Settings → Integrations.
+		if i.GuildID == b.Cfg.GuildID && b.Cfg.TeamRoleID != "" && !slices.Contains(i.Member.Roles, b.Cfg.TeamRoleID) {
 			b.reply(i, "You need the team role to use this bot.")
 			return
 		}
 		data := i.ApplicationCommandData()
 		switch data.Name {
+		case "project":
+			b.projectCmd(i, data)
 		case "upload":
 			b.upload(i, data)
 		case "docs":
@@ -91,9 +173,18 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 	}
 }
 
+// leafOptions returns a command's options, looking inside a subcommand if
+// there is one.
+func leafOptions(data discordgo.ApplicationCommandInteractionData) []*discordgo.ApplicationCommandInteractionDataOption {
+	if len(data.Options) == 1 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
+		return data.Options[0].Options
+	}
+	return data.Options
+}
+
 func options(data discordgo.ApplicationCommandInteractionData) map[string]*discordgo.ApplicationCommandInteractionDataOption {
 	m := map[string]*discordgo.ApplicationCommandInteractionDataOption{}
-	for _, o := range data.Options {
+	for _, o := range leafOptions(data) {
 		m[o.Name] = o
 	}
 	return m
@@ -101,13 +192,17 @@ func options(data discordgo.ApplicationCommandInteractionData) map[string]*disco
 
 func (b *Bot) autocomplete(i *discordgo.InteractionCreate) {
 	var typed string
-	for _, o := range i.ApplicationCommandData().Options {
+	for _, o := range leafOptions(i.ApplicationCommandData()) {
 		if o.Focused {
 			typed = strings.ToLower(o.StringValue())
 		}
 	}
+	projects, err := b.Store.ListProjects(i.GuildID)
+	if err != nil {
+		slog.Error("autocomplete", "err", err)
+	}
 	var choices []*discordgo.ApplicationCommandOptionChoice
-	for _, p := range b.Cfg.Projects {
+	for _, p := range projects {
 		if strings.Contains(p.Name, typed) && len(choices) < 25 {
 			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{Name: p.Name, Value: p.Name})
 		}
@@ -148,11 +243,15 @@ func (b *Bot) project(i *discordgo.InteractionCreate, opts map[string]*discordgo
 	if o == nil {
 		return nil, false
 	}
-	p, ok := b.Cfg.Project(o.StringValue())
-	if !ok {
-		b.reply(i, fmt.Sprintf("No project called `%s`. Add it to projects.yaml first.", o.StringValue()))
+	p, err := b.Store.GetProject(i.GuildID, o.StringValue())
+	if err != nil {
+		b.reply(i, "❌ "+err.Error())
+		return nil, false
 	}
-	return p, ok
+	if p == nil {
+		b.reply(i, fmt.Sprintf("No project called `%s` in this server. Make one with `/project create`.", o.StringValue()))
+	}
+	return p, p != nil
 }
 
 func (b *Bot) upload(i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
@@ -192,7 +291,7 @@ func (b *Bot) upload(i *discordgo.InteractionCreate, data discordgo.ApplicationC
 		b.edit(i, "❌ Upload failed: "+err.Error())
 		return
 	}
-	link := b.Sync.PostURL(res.ThreadID)
+	link := filesync.PostURL(p.GuildID, res.ThreadID)
 	switch res.Status {
 	case filesync.Created:
 		b.edit(i, fmt.Sprintf("✅ Added `%s` to **%s**: %s", path, p.Name, link))
@@ -235,7 +334,7 @@ func (b *Bot) docs(i *discordgo.InteractionCreate, data discordgo.ApplicationCom
 	}
 	var lines []string
 	for _, f := range files {
-		line := fmt.Sprintf("[`%s`](%s) · v%d · %s · <t:%d:R>", f.Path, b.Sync.PostURL(f.ThreadID), f.Version, f.Source, f.UpdatedAt.Unix())
+		line := fmt.Sprintf("[`%s`](%s) · v%d · %s · <t:%d:R>", f.Path, filesync.PostURL(p.GuildID, f.ThreadID), f.Version, f.Source, f.UpdatedAt.Unix())
 		if f.Removed {
 			line = "~~" + line + "~~ (removed)"
 		}
@@ -266,8 +365,8 @@ func (b *Bot) sync(i *discordgo.InteractionCreate, data discordgo.ApplicationCom
 	}
 	opts := options(data)
 	if opts["project"] == nil {
-		b.Trigger("")
-		b.reply(i, "🔁 Checking GitHub for all projects…")
+		b.Trigger(i.GuildID)
+		b.reply(i, "🔁 Checking GitHub for all of this server's projects…")
 		return
 	}
 	p, ok := b.project(i, opts)
@@ -275,10 +374,10 @@ func (b *Bot) sync(i *discordgo.InteractionCreate, data discordgo.ApplicationCom
 		return
 	}
 	if p.Repo == "" {
-		b.reply(i, fmt.Sprintf("**%s** has no repo set in projects.yaml.", p.Name))
+		b.reply(i, fmt.Sprintf("**%s** has no repo. Add one with `/project edit`.", p.Name))
 		return
 	}
-	b.Trigger(p.Name)
+	b.Trigger(p.Key())
 	b.reply(i, fmt.Sprintf("🔁 Checking `%s` now. Updates land in the forum within a minute.", p.Repo))
 }
 
@@ -286,9 +385,9 @@ func (b *Bot) token(i *discordgo.InteractionCreate) {
 	raw := make([]byte, 24)
 	rand.Read(raw)
 	tok := "phb_" + hex.EncodeToString(raw)
-	if err := b.Store.PutToken(filesync.Hash([]byte(tok)), i.Member.User.ID, i.Member.DisplayName()); err != nil {
+	if err := b.Store.PutToken(filesync.Hash([]byte(tok)), i.Member.User.ID, i.Member.DisplayName(), i.GuildID); err != nil {
 		b.reply(i, "❌ "+err.Error())
 		return
 	}
-	b.reply(i, fmt.Sprintf("Your docsync token (only shown once; this replaces any older token):\n```\ndocsync login --server %s --token %s\n```\nYou need to be on the Tailscale network to reach the server.", b.APIURL, tok))
+	b.reply(i, fmt.Sprintf("Your docsync token for **this server's** projects (only shown once; this replaces any older token, from any server):\n```\ndocsync login --server %s --token %s\n```\nYou need to be on the Tailscale network to reach the server.", b.APIURL, tok))
 }

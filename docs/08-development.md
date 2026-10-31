@@ -21,10 +21,10 @@ Don't share a database between a local run and the server. Each one thinks it ow
 ```
 cmd/bot/            entry point: Discord + GitHub watcher + docsync API
 cmd/docsync/        the CLI teammates run
-internal/config/    loads projects.yaml, glob matching (docs vs dev)
-internal/store/     SQLite: files, gh_state, cli_tokens
+internal/config/    loads projects.yaml, project validation, glob matching (docs vs dev)
+internal/store/     SQLite: projects, files, gh_state, cli_tokens
 internal/filesync/  Upsert(): the one create / dedupe / replace path
-internal/discord/   forum posting (Poster) and slash commands (Bot)
+internal/discord/   forum posting (Poster), slash commands (Bot), /project (project.go)
 internal/ghwatch/   GitHub polling, mirroring, activity feed
 internal/api/       HTTP API for docsync
 ```
@@ -36,7 +36,8 @@ internal/api/       HTTP API for docsync
 | Package | Covers |
 |---|---|
 | `filesync` | Create, unchanged, replace, GitHub ownership and `force`, deleted posts recreated, removed-then-restored files, size limit, path cleaning |
-| `api` | Token auth, check, upload, unchanged re-check, size limit, attribution |
+| `api` | Token auth, tokens limited to their own server, check, upload, unchanged re-check, size limit, attribution |
+| `store` | Project storage per server, moving pre-multi-server rows onto the home server, forgetting a removed server |
 | `config` | Glob matching for docs vs dev files |
 
 The Discord and GitHub layers sit behind small interfaces (`filesync.Poster`, `ghwatch.Notifier`), so the logic is tested with fakes and no network.
@@ -45,7 +46,7 @@ The Discord and GitHub layers sit behind small interfaces (`filesync.Poster`, `g
 
 1. Add it to `commands` in `internal/discord/commands.go`.
 2. Handle it in `onInteraction`.
-3. Deploy. Commands are registered for the server on startup, so they appear straight away.
+3. Deploy. Commands are registered globally on startup, so they work in every server the bot is in. Restart Discord (Ctrl+R) if a change doesn't show up straight away.
 
 If the change collects any new data, update [07 · Data and security](07-data-and-security.md) and the [Privacy Policy](../legal/privacy-policy.md).
 

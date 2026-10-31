@@ -17,7 +17,6 @@ import (
 )
 
 type Server struct {
-	Cfg   *config.Config
 	Store *store.Store
 	Sync  *filesync.Syncer
 }
@@ -39,7 +38,10 @@ type UploadResult struct {
 	URL     string          `json:"url"`
 }
 
-type userKey struct{}
+// caller is who a token belongs to and the server it was made in.
+type caller struct{ User, GuildID string }
+
+type callerKey struct{}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -56,7 +58,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			httpError(w, http.StatusUnauthorized, "missing token; run /token in Discord")
 			return
 		}
-		user, err := s.Store.LookupToken(filesync.Hash([]byte(tok)))
+		user, guild, err := s.Store.LookupToken(filesync.Hash([]byte(tok)))
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -65,24 +67,36 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			httpError(w, http.StatusUnauthorized, "unknown token; run /token in Discord for a new one")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller{user, guild})))
 	})
 }
 
-func (s *Server) projects(w http.ResponseWriter, _ *http.Request) {
+func callerOf(r *http.Request) caller { return r.Context().Value(callerKey{}).(caller) }
+
+func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.Store.ListProjects(callerOf(r).GuildID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	names := []string{}
-	for _, p := range s.Cfg.Projects {
+	for _, p := range projects {
 		names = append(names, p.Name)
 	}
 	writeJSON(w, names)
 }
 
+// project looks the name up in the caller's server only.
 func (s *Server) project(w http.ResponseWriter, r *http.Request) (*config.Project, bool) {
-	p, ok := s.Cfg.Project(r.PathValue("project"))
-	if !ok {
+	p, err := s.Store.GetProject(callerOf(r).GuildID, r.PathValue("project"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if p == nil {
 		httpError(w, http.StatusNotFound, "no such project: "+r.PathValue("project"))
 	}
-	return p, ok
+	return p, p != nil
 }
 
 func (s *Server) check(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +116,7 @@ func (s *Server) check(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, f.Path+": "+err.Error())
 			return
 		}
-		st, err := s.Sync.Check(p.Name, clean, f.SHA256)
+		st, err := s.Sync.Check(p, clean, f.SHA256)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -129,7 +143,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.Sync.Upsert(r.Context(), filesync.Request{
 		Project: p, Path: r.PathValue("path"), Content: body, Source: store.SourceCLI,
-		User: r.Context().Value(userKey{}).(string), Force: r.URL.Query().Get("force") == "1",
+		User: callerOf(r).User, Force: r.URL.Query().Get("force") == "1",
 	})
 	if err != nil {
 		slog.Error("cli upload failed", "project", p.Name, "path", r.PathValue("path"), "err", err)
@@ -138,7 +152,7 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	out := UploadResult{Status: res.Status, Version: res.Version}
 	if res.ThreadID != "" {
-		out.URL = s.Sync.PostURL(res.ThreadID)
+		out.URL = filesync.PostURL(p.GuildID, res.ThreadID)
 	}
 	writeJSON(w, out)
 }

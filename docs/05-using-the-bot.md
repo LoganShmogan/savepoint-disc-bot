@@ -4,7 +4,26 @@ This guide is for everyone on the Save Point team.
 
 ## Slash commands
 
-Type `/` in any channel of the Save Point server. Replies are private to you.
+Type `/` in any channel of a server the bot is in. Replies are private to you. Each server has its own projects.
+
+### `/project create name [repo] [branch] [docs] [dev_files] [category] [forum]`
+
+Makes a forum for a project and starts syncing it. You need **Manage Channels** to use it.
+
+- `name`: lowercase, no spaces, e.g. `memeline`. It's used in `/upload` and docsync.
+- `repo`: optional GitHub repo to mirror, as `owner/name`. Leave it out for an upload-only project. Servers other than Save Point's can only use public repos.
+- `branch`: defaults to `main`. Check the repo's default branch, because some use `master`.
+- `docs` / `dev_files`: comma-separated globs, e.g. `docs/**, README.md`. `docs` defaults to `docs/**, README.md` when a repo is set. See [globs](03-configuration.md#choosing-files-with-globs).
+- `category`: where to put the new forum.
+- `forum`: use an existing forum instead of making a new one. Missing tags are added to it.
+
+### `/project edit project [repo] [branch] [docs] [dev_files]`
+
+Changes the options you give and leaves the rest alone. Use `-` to clear `repo` or `dev_files`.
+
+### `/project remove project`
+
+Stops syncing a project. The forum and its posts are kept.
 
 ### `/upload project file [path] [force]`
 
@@ -28,11 +47,11 @@ Lists every file the bot manages for a project, with its version, where it came 
 
 ### `/sync [project]`
 
-Checks GitHub right away instead of waiting for the next poll (every 3 minutes). Leave `project` out to check every project.
+Checks GitHub right away instead of waiting for the next poll (every 3 minutes). Leave `project` out to check every project in this server.
 
 ### `/token`
 
-Gives you a personal token for the `docsync` CLI. It is shown once, and asking again replaces your old token.
+Gives you a personal token for the `docsync` CLI, for the projects in the server where you ran it. It is shown once, and asking again (in any server) replaces your old token.
 
 ## The `docsync` CLI
 

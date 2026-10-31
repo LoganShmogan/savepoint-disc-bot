@@ -39,6 +39,7 @@ There is **no web dashboard and no public website** for this bot. You use it ent
 
 | Command | What it does |
 |---|---|
+| `/project create name [repo] …` | Make a forum for a project and start syncing it. Also `edit` and `remove`. Works in any server the bot is in. |
 | `/upload project file [path] [force]` | Add or replace a file. Replies *created*, *updated to vN* or *already up to date*. |
 | `/docs project` | List a project's files with versions and links. |
 | `/sync [project]` | Check GitHub now instead of waiting for the next poll. |

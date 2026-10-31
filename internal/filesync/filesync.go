@@ -66,7 +66,6 @@ type Syncer struct {
 	Store    *store.Store
 	Poster   Poster
 	MaxBytes int
-	GuildID  string
 
 	mu sync.Mutex // serialises upserts so two sources can't race on one post
 }
@@ -88,8 +87,8 @@ func CleanPath(p string) (string, error) {
 }
 
 // Check reports what Upsert would do with content at path, without posting.
-func (s *Syncer) Check(project, p, sum string) (Status, error) {
-	rec, err := s.Store.GetFile(project, p)
+func (s *Syncer) Check(project *config.Project, p, sum string) (Status, error) {
+	rec, err := s.Store.GetFile(project.Key(), p)
 	switch {
 	case err != nil:
 		return "", err
@@ -116,7 +115,7 @@ func (s *Syncer) Upsert(ctx context.Context, req Request) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	proj := req.Project.Name
+	proj := req.Project.Key()
 	sum := Hash(req.Content)
 	rec, err := s.Store.GetFile(proj, p)
 	if err != nil {
@@ -189,8 +188,8 @@ func (s *Syncer) MarkRemoved(ctx context.Context, rec *store.File, commit string
 	return s.Store.PutFile(rec)
 }
 
-func (s *Syncer) PostURL(threadID string) string {
-	return fmt.Sprintf("https://discord.com/channels/%s/%s", s.GuildID, threadID)
+func PostURL(guildID, threadID string) string {
+	return fmt.Sprintf("https://discord.com/channels/%s/%s", guildID, threadID)
 }
 
 func (s *Syncer) header(f *store.File, commit string) string {

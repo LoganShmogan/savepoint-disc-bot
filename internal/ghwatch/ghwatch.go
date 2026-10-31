@@ -43,7 +43,7 @@ type Notifier interface {
 
 type Watcher struct {
 	GH       *github.Client
-	Cfg      *config.Config
+	Cfg      *config.Config // GuildID is the only server allowed to mirror private repos
 	Store    *store.Store
 	Sync     *filesync.Syncer
 	Notify   Notifier
@@ -60,10 +60,11 @@ func New(token string, cfg *config.Config, st *store.Store, sync *filesync.Synce
 	}
 }
 
-// Trigger queues an immediate poll of one project, or all when name is "".
-func (w *Watcher) Trigger(name string) {
+// Trigger queues an immediate poll. only is a project key (guild/name) for
+// one project, a guild ID for all of a server's projects, or "" for all.
+func (w *Watcher) Trigger(only string) {
 	select {
-	case w.trigger <- name:
+	case w.trigger <- only:
 	default: // a poll is already queued
 	}
 }
@@ -78,27 +79,62 @@ func (w *Watcher) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			w.pollAll(ctx, "")
-		case name := <-w.trigger:
-			w.pollAll(ctx, name)
+		case only := <-w.trigger:
+			w.pollAll(ctx, only)
 		}
 	}
 }
 
 func (w *Watcher) pollAll(ctx context.Context, only string) {
-	for i := range w.Cfg.Projects {
-		p := &w.Cfg.Projects[i]
-		if p.Repo == "" || (only != "" && p.Name != only) {
+	projects, err := w.Store.ListProjects("")
+	if err != nil {
+		slog.Error("list projects", "err", err)
+		return
+	}
+	for _, p := range projects {
+		if p.Repo == "" || (only != "" && only != p.Key() && only != p.GuildID) {
 			continue
 		}
 		if err := w.poll(ctx, p); err != nil {
-			slog.Error("github poll failed", "project", p.Name, "repo", p.Repo, "err", err)
+			slog.Error("github poll failed", "guild", p.GuildID, "project", p.Name, "repo", p.Repo, "err", err)
 		}
 	}
 }
 
+// ErrPrivateRepo stops other servers from mirroring repos that only the
+// bot's GitHub token can see.
+var ErrPrivateRepo = errors.New("private repos can only be used in the home server; make the repo public or use a public one")
+
+// CheckRepo confirms the repo and branch exist and that the project's server
+// may mirror it.
+func (w *Watcher) CheckRepo(ctx context.Context, p *config.Project) error {
+	owner, repo := p.OwnerRepo()
+	r, _, err := w.GH.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return fmt.Errorf("can't find %s on GitHub: %w", p.Repo, err)
+	}
+	if r.GetPrivate() && p.GuildID != w.Cfg.GuildID {
+		return ErrPrivateRepo
+	}
+	if _, _, err := w.GH.Repositories.GetBranch(ctx, owner, repo, p.Branch, 1); err != nil {
+		return fmt.Errorf("can't find branch %s in %s: %w", p.Branch, p.Repo, err)
+	}
+	return nil
+}
+
 func (w *Watcher) poll(ctx context.Context, p *config.Project) error {
 	owner, repo := p.OwnerRepo()
-	st, err := w.Store.GetGHState(p.Name)
+	if p.GuildID != w.Cfg.GuildID {
+		// Re-checked every poll in case a public repo was made private.
+		r, _, err := w.GH.Repositories.Get(ctx, owner, repo)
+		if err != nil {
+			return fmt.Errorf("get repo: %w", err)
+		}
+		if r.GetPrivate() {
+			return ErrPrivateRepo
+		}
+	}
+	st, err := w.Store.GetGHState(p.Key())
 	if err != nil {
 		return err
 	}
@@ -168,7 +204,7 @@ func (w *Watcher) mirror(ctx context.Context, p *config.Project, head string) er
 		}
 		present[path] = true
 
-		rec, err := w.Store.GetFile(p.Name, path)
+		rec, err := w.Store.GetFile(p.Key(), path)
 		if err != nil {
 			return err
 		}
@@ -193,7 +229,7 @@ func (w *Watcher) mirror(ctx context.Context, p *config.Project, head string) er
 		slog.Info("mirrored", "project", p.Name, "path", path, "status", res.Status, "version", res.Version)
 	}
 
-	files, err := w.Store.ListFiles(p.Name)
+	files, err := w.Store.ListFiles(p.Key())
 	if err != nil {
 		return err
 	}

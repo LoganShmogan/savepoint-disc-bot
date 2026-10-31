@@ -32,11 +32,12 @@ func TestCLIFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	cfg := &config.Config{GuildID: "g", Projects: []config.Project{{Name: "demo", ForumChannelID: "f", Docs: []string{"docs/**"}}}}
-	sync := &filesync.Syncer{Store: st, Poster: &nopPoster{}, MaxBytes: 16, GuildID: "g"}
-	srv := httptest.NewServer((&Server{Cfg: cfg, Store: st, Sync: sync}).Handler())
+	st.PutProject(&config.Project{GuildID: "g", Name: "demo", ForumChannelID: "f", Docs: []string{"docs/**"}})
+	sync := &filesync.Syncer{Store: st, Poster: &nopPoster{}, MaxBytes: 16}
+	srv := httptest.NewServer((&Server{Store: st, Sync: sync}).Handler())
 	defer srv.Close()
-	st.PutToken(filesync.Hash([]byte("tok")), "u1", "logan")
+	st.PutToken(filesync.Hash([]byte("tok")), "u1", "logan", "g")
+	st.PutToken(filesync.Hash([]byte("other")), "u2", "someone", "g2")
 
 	do := func(method, path string, body []byte, auth string) *http.Response {
 		req, _ := http.NewRequest(method, srv.URL+path, bytes.NewReader(body))
@@ -60,6 +61,9 @@ func TestCLIFlow(t *testing.T) {
 	if r := do("GET", "/api/projects", nil, "wrong"); r.StatusCode != 401 {
 		t.Fatalf("bad token: %d", r.StatusCode)
 	}
+	if r := do("POST", "/api/projects/demo/check", []byte("[]"), "other"); r.StatusCode != 404 {
+		t.Fatalf("another server's token reached demo: %d", r.StatusCode)
+	}
 	if s := check("hello"); s != filesync.Created {
 		t.Fatalf("new file: %s", s)
 	}
@@ -77,7 +81,7 @@ func TestCLIFlow(t *testing.T) {
 	if r := do("PUT", "/api/projects/demo/files/docs/big.md", bytes.Repeat([]byte("x"), 17), "tok"); r.StatusCode != 413 {
 		t.Fatalf("too large: %d", r.StatusCode)
 	}
-	rec, _ := st.GetFile("demo", "docs/a.md")
+	rec, _ := st.GetFile("g/demo", "docs/a.md")
 	if rec.UpdatedBy != "logan" || rec.Source != store.SourceCLI {
 		t.Fatalf("attribution: %+v", rec)
 	}

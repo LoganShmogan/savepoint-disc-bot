@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,12 +42,14 @@ func run() error {
 	if token == "" {
 		return errors.New("DISCORD_TOKEN is not set")
 	}
-	cfg, err := config.Load(env("CONFIG_PATH", "projects.yaml"))
+	cfgPath := env("CONFIG_PATH", "projects.yaml")
+	cfg, err := config.Load(cfgPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("no config file; running with defaults and no home server", "path", cfgPath)
+		cfg, err = config.Default(), nil
+	}
 	if err != nil {
 		return err
-	}
-	if cfg.GuildID == "" {
-		return errors.New("guild_id is required in projects.yaml")
 	}
 	dbPath := env("DB_PATH", "data/hub.db")
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
@@ -57,6 +60,17 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	if cfg.GuildID != "" {
+		if err := st.AdoptLegacy(cfg.GuildID); err != nil {
+			return err
+		}
+	}
+	// projects.yaml wins over /project edits for the projects it lists.
+	for i := range cfg.Projects {
+		if err := st.PutProject(&cfg.Projects[i]); err != nil {
+			return err
+		}
+	}
 
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -65,7 +79,7 @@ func run() error {
 	s.Identify.Intents = discordgo.IntentsGuilds
 
 	poster := discord.NewPoster(s)
-	syncer := &filesync.Syncer{Store: st, Poster: poster, MaxBytes: cfg.MaxFileBytes(), GuildID: cfg.GuildID}
+	syncer := &filesync.Syncer{Store: st, Poster: poster, MaxBytes: cfg.MaxFileBytes()}
 	bot := discord.NewBot(s, cfg, st, syncer)
 	bot.APIURL = env("PUBLIC_API_URL", "http://localhost:8080")
 
@@ -75,7 +89,7 @@ func run() error {
 	var watcher *ghwatch.Watcher
 	if gh := os.Getenv("GITHUB_TOKEN"); gh != "" {
 		watcher = ghwatch.New(gh, cfg, st, syncer, poster)
-		bot.Trigger = watcher.Trigger
+		bot.Trigger, bot.CheckRepo = watcher.Trigger, watcher.CheckRepo
 	} else {
 		slog.Warn("GITHUB_TOKEN not set; GitHub sync disabled")
 	}
@@ -87,12 +101,12 @@ func run() error {
 	if err := bot.Register(); err != nil {
 		return err
 	}
-	slog.Info("connected to Discord", "user", s.State.User.Username, "projects", len(cfg.Projects))
+	slog.Info("connected to Discord", "user", s.State.User.Username, "servers", len(s.State.Guilds))
 	if watcher != nil {
 		go watcher.Run(ctx)
 	}
 
-	srv := &http.Server{Addr: env("API_ADDR", ":8080"), Handler: (&api.Server{Cfg: cfg, Store: st, Sync: syncer}).Handler()}
+	srv := &http.Server{Addr: env("API_ADDR", ":8080"), Handler: (&api.Server{Store: st, Sync: syncer}).Handler()}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("api server", "err", err)

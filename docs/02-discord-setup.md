@@ -10,18 +10,18 @@ This is a one-time setup for the Discord application and the project forums.
    - **Privacy Policy URL:** `https://savepoint.co.nz/legal/discord-bot#privacy`
 3. Under **Bot**:
    - **Reset Token** and put the token in `.env` as `DISCORD_TOKEN`. Never paste it in chat or commit it.
-   - Turn **Public Bot** off, so only Save Point can invite it.
+   - **Public Bot** controls who can add the bot to a server. Leave it off and only the application's owner can invite it (to any server they manage). Turn it on only if other people should be able to add it to their own servers. See [Other servers](#6-other-servers) for what they can and can't do.
    - Leave all **Privileged Gateway Intents** off. The bot doesn't need them.
 
 ## 2. Invite it
 
-Replace `APPLICATION_ID` with the ID from **General Information**, then open the link and pick the Save Point server:
+Replace `APPLICATION_ID` with the ID from **General Information**, then open the link and pick a server. Use the same link for every server you add it to:
 
 ```
-https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot+applications.commands&permissions=326417632256
+https://discord.com/oauth2/authorize?client_id=APPLICATION_ID&scope=bot+applications.commands&permissions=326417632272
 ```
 
-`326417632256` grants exactly these permissions: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Embed Links, Attach Files and Read Message History.
+`326417632272` grants exactly these permissions: Manage Channels (so `/project create` can make forums), View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Embed Links, Attach Files and Read Message History.
 
 ## 3. Turn on Community
 
@@ -30,9 +30,13 @@ Discord only offers forum channels in **Community** servers:
 
 ## 4. Create the project forums
 
+The quickest way is `/project create` (see [05 · Using the bot](05-using-the-bot.md#project-create-name-repo-branch-docs-dev_files-category-forum)). It makes the forum, adds the `docs`, `dev` and `github` tags and starts syncing, with no config file or restart.
+
+To make forums by hand instead:
+
 1. Right-click the channel list → **Create Category** → `PROJECTS`. Optionally make it private for the team role.
-2. For each project: right-click the category → **Create Channel** → **Forum**, and name it after the project.
-3. In each forum, open ⚙️ **Edit Channel**:
+2. For each project: right-click the category → **Create Channel** → **Forum**, and name it after the project. Then run `/project create` with `forum:` set to it, or list it in `projects.yaml`.
+3. Either way, these forum settings are worth changing in ⚙️ **Edit Channel**:
 
 | Setting | Value | Why |
 |---|---|---|
@@ -50,4 +54,12 @@ Turn on **Settings → Advanced → Developer Mode**, then right-click → **Cop
 - each **forum** → `forum_channel_id`
 - optionally a **role** (Server Settings → Roles) → `team_role_id`
 
-These go into `projects.yaml` (see [03 · Configuration](03-configuration.md)).
+These go into `projects.yaml` (see [03 · Configuration](03-configuration.md)). You only need forum IDs for projects you list there rather than making with `/project create`.
+
+## 6. Other servers
+
+Invite the bot with the same link, turn on Community, then run `/project create` there. Each server's projects, `/docs` lists, `/sync` and docsync tokens are kept separate.
+
+- **Who can use `/project`:** members with **Manage Channels**, by default. Change this per server in **Server Settings → Integrations → Project Hub**, where you can also limit the other commands to a role. (`team_role_id` only applies to the home server.)
+- **Private repos:** only the home server (`guild_id`) can mirror private repos. Other servers can only mirror **public** ones. Otherwise anyone who could add the bot could read every private repo the bot's GitHub token can see.
+- **Removing the bot** from a server makes it forget that server's projects. The forums and posts stay.

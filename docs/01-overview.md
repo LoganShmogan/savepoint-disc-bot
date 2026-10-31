@@ -43,7 +43,7 @@ Every file, wherever it comes from, goes through the same step, **filesync**:
 - **No dashboard and no website.** You use it only through Discord slash commands and the `docsync` CLI.
 - **It doesn't read chat.** The bot doesn't request Discord's message content access and ignores conversations.
 - **It doesn't write to GitHub.** Its GitHub token is read-only.
-- **It isn't public.** It runs only in Save Point's own Discord server.
+- **It isn't public.** It runs only in Discord servers Save Point runs. Each server has its own projects, made with `/project create`.
 
 ## Built with
 
